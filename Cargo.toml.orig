@@ -10,6 +10,16 @@ repository="https://github.com/DarthSim/quantizr"
 [lib]
 name = "quantizr"
 
+[dependencies]
+archmage = "0.4"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "vptree"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

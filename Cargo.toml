@@ -32,8 +32,18 @@ capi = []
 name = "quantizr"
 path = "src/lib.rs"
 
+[dependencies]
+archmage = "0.4"
+
 [profile.release]
 opt-level = 3
 lto = true
 debug = 0
 debug-assertions = false
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "vptree"
+harness = false

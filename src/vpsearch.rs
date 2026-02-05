@@ -69,14 +69,14 @@ impl SearchNode {
             .map(|(i, _)| indexes.swap_remove(i))
             .unwrap();
 
-        indexes.sort_by_cached_key(|i| OrdFloat32::from(dist(&vp_ind.data, &i.data)));
+        indexes.sort_by_cached_key(|i| OrdFloat32::from(dist_scalar(&vp_ind.data, &i.data)));
 
         let (near, far, rest, radius_sq) = if indexes.len() < 7 {
             (None, None, indexes.to_vec(), f32::MAX)
         } else {
             let half_idx = indexes.len() / 2;
             let (near_indexes, far_indexes) = indexes.split_at_mut(half_idx);
-            let radius_sq = dist(&vp_ind.data, &far_indexes[0].data);
+            let radius_sq = dist_scalar(&vp_ind.data, &far_indexes[0].data);
 
             (
                 Self::new(near_indexes.to_vec().as_mut(), weights),
@@ -98,15 +98,17 @@ impl SearchNode {
         Some(Box::new(node))
     }
 
+    // SSE version - token passed through, no dispatch overhead
+    #[cfg(target_arch = "x86_64")]
     #[inline(always)]
-    fn visit<'a>(&'a self, pin: &[f32; 4], nearest: &mut SearchVisitor<'a>) {
-        let distance_sq = dist(&self.ind.data, pin);
+    fn visit_sse<'a>(&'a self, token: archmage::X64V2Token, pin: &[f32; 4], nearest: &mut SearchVisitor<'a>) {
+        let distance_sq = dist_sse(token, &self.ind.data, pin);
 
         nearest.visit(&self.ind, distance_sq);
 
         if !self.rest.is_empty() {
             for r in self.rest.iter() {
-                let distance_sq = dist(&r.data, pin);
+                let distance_sq = dist_sse(token, &r.data, pin);
                 nearest.visit(r, distance_sq);
             }
 
@@ -115,28 +117,101 @@ impl SearchNode {
 
         if distance_sq < self.radius_sq {
             if let Some(near) = &self.near {
-                near.visit(pin, nearest);
+                near.visit_sse(token, pin, nearest);
             }
-            // Original: distance_sq.sqrt() >= self.radius - nearest.distance
-            // Rewritten without sqrt:
-            // If radius <= nearest.distance: always true (d >= 0 >= non-positive)
-            // If radius > nearest.distance: dist_sq >= (radius - nearest.distance)^2
             let diff = self.radius - nearest.distance;
             if diff <= 0.0 || distance_sq >= diff * diff {
                 if let Some(far) = &self.far {
-                    far.visit(pin, nearest);
+                    far.visit_sse(token, pin, nearest);
                 }
             }
         } else {
             if let Some(far) = &self.far {
-                far.visit(pin, nearest);
+                far.visit_sse(token, pin, nearest);
             }
-            // Original: distance_sq.sqrt() <= self.radius + nearest.distance
-            // Rewritten: dist_sq <= (radius + nearest.distance)^2
             let sum = self.radius + nearest.distance;
             if distance_sq <= sum * sum {
                 if let Some(near) = &self.near {
-                    near.visit(pin, nearest);
+                    near.visit_sse(token, pin, nearest);
+                }
+            }
+        }
+    }
+
+    // NEON version - token passed through, no dispatch overhead
+    #[cfg(target_arch = "aarch64")]
+    #[inline(always)]
+    fn visit_neon<'a>(&'a self, token: archmage::NeonToken, pin: &[f32; 4], nearest: &mut SearchVisitor<'a>) {
+        let distance_sq = dist_neon(token, &self.ind.data, pin);
+
+        nearest.visit(&self.ind, distance_sq);
+
+        if !self.rest.is_empty() {
+            for r in self.rest.iter() {
+                let distance_sq = dist_neon(token, &r.data, pin);
+                nearest.visit(r, distance_sq);
+            }
+
+            return;
+        }
+
+        if distance_sq < self.radius_sq {
+            if let Some(near) = &self.near {
+                near.visit_neon(token, pin, nearest);
+            }
+            let diff = self.radius - nearest.distance;
+            if diff <= 0.0 || distance_sq >= diff * diff {
+                if let Some(far) = &self.far {
+                    far.visit_neon(token, pin, nearest);
+                }
+            }
+        } else {
+            if let Some(far) = &self.far {
+                far.visit_neon(token, pin, nearest);
+            }
+            let sum = self.radius + nearest.distance;
+            if distance_sq <= sum * sum {
+                if let Some(near) = &self.near {
+                    near.visit_neon(token, pin, nearest);
+                }
+            }
+        }
+    }
+
+    // Scalar fallback
+    #[inline(always)]
+    fn visit_scalar<'a>(&'a self, pin: &[f32; 4], nearest: &mut SearchVisitor<'a>) {
+        let distance_sq = dist_scalar(&self.ind.data, pin);
+
+        nearest.visit(&self.ind, distance_sq);
+
+        if !self.rest.is_empty() {
+            for r in self.rest.iter() {
+                let distance_sq = dist_scalar(&r.data, pin);
+                nearest.visit(r, distance_sq);
+            }
+
+            return;
+        }
+
+        if distance_sq < self.radius_sq {
+            if let Some(near) = &self.near {
+                near.visit_scalar(pin, nearest);
+            }
+            let diff = self.radius - nearest.distance;
+            if diff <= 0.0 || distance_sq >= diff * diff {
+                if let Some(far) = &self.far {
+                    far.visit_scalar(pin, nearest);
+                }
+            }
+        } else {
+            if let Some(far) = &self.far {
+                far.visit_scalar(pin, nearest);
+            }
+            let sum = self.radius + nearest.distance;
+            if distance_sq <= sum * sum {
+                if let Some(near) = &self.near {
+                    near.visit_scalar(pin, nearest);
                 }
             }
         }
@@ -170,7 +245,31 @@ impl SearchTree {
         if let Some(vantage_point) = &self.root {
             let mut nearest = SearchVisitor::new();
 
-            vantage_point.visit(pin, &mut nearest);
+            // Summon token ONCE here, then pass through entire traversal
+            #[cfg(target_arch = "x86_64")]
+            {
+                use archmage::SimdToken;
+                if let Some(token) = archmage::X64V2Token::summon() {
+                    vantage_point.visit_sse(token, pin, &mut nearest);
+                } else {
+                    vantage_point.visit_scalar(pin, &mut nearest);
+                }
+            }
+
+            #[cfg(target_arch = "aarch64")]
+            {
+                use archmage::SimdToken;
+                if let Some(token) = archmage::NeonToken::summon() {
+                    vantage_point.visit_neon(token, pin, &mut nearest);
+                } else {
+                    vantage_point.visit_scalar(pin, &mut nearest);
+                }
+            }
+
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            {
+                vantage_point.visit_scalar(pin, &mut nearest);
+            }
 
             if let Some(nearest_ind) = nearest.ind {
                 (nearest_ind.ind, nearest_ind.data, nearest.distance)
@@ -183,12 +282,13 @@ impl SearchTree {
     }
 }
 
+// SSE distance - takes token, no dispatch inside
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn dist(c1: &[f32; 4], c2: &[f32; 4]) -> f32 {
+fn dist_sse(_token: archmage::X64V2Token, c1: &[f32; 4], c2: &[f32; 4]) -> f32 {
+    use core::arch::x86_64::*;
+    // SAFETY: X64V2Token guarantees SSE4.2 is available
     unsafe {
-        use std::arch::x86_64::*;
-
         let pc1 = _mm_loadu_ps(c1.as_ptr());
         let pc2 = _mm_loadu_ps(c2.as_ptr());
 
@@ -204,12 +304,13 @@ fn dist(c1: &[f32; 4], c2: &[f32; 4]) -> f32 {
     }
 }
 
-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+// NEON distance - takes token, no dispatch inside
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
-fn dist(c1: &[f32; 4], c2: &[f32; 4]) -> f32 {
+fn dist_neon(_token: archmage::NeonToken, c1: &[f32; 4], c2: &[f32; 4]) -> f32 {
+    use core::arch::aarch64::*;
+    // SAFETY: NeonToken guarantees NEON is available
     unsafe {
-        use std::arch::aarch64::*;
-
         let pc1 = vld1q_f32(c1.as_ptr());
         let pc2 = vld1q_f32(c2.as_ptr());
 
@@ -220,12 +321,9 @@ fn dist(c1: &[f32; 4], c2: &[f32; 4]) -> f32 {
     }
 }
 
-#[cfg(not(any(
-    target_arch = "x86_64",
-    all(target_arch = "aarch64", target_feature = "neon")
-)))]
+// Scalar fallback
 #[inline(always)]
-fn dist(c1: &[f32; 4], c2: &[f32; 4]) -> f32 {
+fn dist_scalar(c1: &[f32; 4], c2: &[f32; 4]) -> f32 {
     (c1[0] - c2[0]).powi(2)
         + (c1[1] - c2[1]).powi(2)
         + (c1[2] - c2[2]).powi(2)
