@@ -90,6 +90,23 @@ impl Colormap {
     pub(crate) fn nearest_ind(&self, color: &[f32; 4]) -> (u8, [f32; 4], f32) {
         self.tree.find_nearest(color)
     }
+
+    /// Compute squared distance from `color` to the second-nearest palette entry
+    /// (excluding `best_idx`). Used for cache validation margin.
+    pub(crate) fn second_nearest_dist_sq(&self, best_idx: u8, color: &[f32; 4]) -> f32 {
+        let pal = self.get_palette();
+        let mut second_best = f32::MAX;
+        for (i, entry) in pal.entries.iter().enumerate() {
+            if i as u8 == best_idx { continue; }
+            let dr = color[0] - entry.r as f32;
+            let dg = color[1] - entry.g as f32;
+            let db = color[2] - entry.b as f32;
+            let da = color[3] - entry.a as f32;
+            let d = dr * dr + dg * dg + db * db + da * da;
+            if d < second_best { second_best = d; }
+        }
+        second_best
+    }
 }
 
 fn kmeans(
@@ -172,8 +189,6 @@ fn sort_colors(entries: &mut [[f32; 4]], weights: &mut [f32]) {
             }
         }
     }
-
-    // entries.sort_unstable_by_key(|e| OrdFloat32::from(e[3]));
 }
 
 #[cfg(target_arch = "x86_64")]

@@ -21,6 +21,7 @@ impl<'a> SearchVisitor<'a> {
         }
     }
 
+    #[inline(always)]
     fn visit(&mut self, ind: &'a SearchIdx, distance_sq: f32) {
         if self.distance_sq > distance_sq {
             self.ind = Some(ind);
@@ -97,6 +98,7 @@ impl SearchNode {
         Some(Box::new(node))
     }
 
+    #[inline(always)]
     fn visit<'a>(&'a self, pin: &[f32; 4], nearest: &mut SearchVisitor<'a>) {
         let distance_sq = dist(&self.ind.data, pin);
 
@@ -115,7 +117,12 @@ impl SearchNode {
             if let Some(near) = &self.near {
                 near.visit(pin, nearest);
             }
-            if distance_sq.sqrt() >= self.radius - nearest.distance {
+            // Original: distance_sq.sqrt() >= self.radius - nearest.distance
+            // Rewritten without sqrt:
+            // If radius <= nearest.distance: always true (d >= 0 >= non-positive)
+            // If radius > nearest.distance: dist_sq >= (radius - nearest.distance)^2
+            let diff = self.radius - nearest.distance;
+            if diff <= 0.0 || distance_sq >= diff * diff {
                 if let Some(far) = &self.far {
                     far.visit(pin, nearest);
                 }
@@ -124,7 +131,10 @@ impl SearchNode {
             if let Some(far) = &self.far {
                 far.visit(pin, nearest);
             }
-            if distance_sq.sqrt() <= self.radius + nearest.distance {
+            // Original: distance_sq.sqrt() <= self.radius + nearest.distance
+            // Rewritten: dist_sq <= (radius + nearest.distance)^2
+            let sum = self.radius + nearest.distance;
+            if distance_sq <= sum * sum {
                 if let Some(near) = &self.near {
                     near.visit(pin, nearest);
                 }
@@ -182,13 +192,15 @@ fn dist(c1: &[f32; 4], c2: &[f32; 4]) -> f32 {
         let pc1 = _mm_loadu_ps(c1.as_ptr());
         let pc2 = _mm_loadu_ps(c2.as_ptr());
 
-        let mut dist = _mm_sub_ps(pc1, pc2);
-        dist = _mm_mul_ps(dist, dist);
+        let diff = _mm_sub_ps(pc1, pc2);
+        let sq = _mm_mul_ps(diff, diff);
 
-        let mut tmp = [0f32; 4];
-        _mm_storeu_ps(tmp.as_mut_ptr(), dist);
-
-        tmp[0] + tmp[1] + tmp[2] + tmp[3]
+        // Horizontal sum without memory round-trip
+        let hi = _mm_movehl_ps(sq, sq);
+        let sum2 = _mm_add_ps(sq, hi);
+        let shuf = _mm_shuffle_ps(sum2, sum2, 1);
+        let total = _mm_add_ss(sum2, shuf);
+        _mm_cvtss_f32(total)
     }
 }
 

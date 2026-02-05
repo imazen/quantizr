@@ -8,6 +8,39 @@ use crate::palette::Palette;
 
 const EMPTY_PIX: [u8; 4] = [0; 4];
 
+/// Per-pixel color cache indexed by quantized color key.
+/// Uses 15-bit key (5 bits per RGB channel) as direct index into a 32K table.
+/// 32K × 22 bytes ≈ 720KB - fits in L2 cache, gives zero-collision direct mapping.
+const CACHE_BITS: u32 = 6; // bits per channel (4-unit buckets)
+const CACHE_SHIFT: u32 = 8 - CACHE_BITS; // shift to extract
+const CACHE_SIZE: usize = 1 << (CACHE_BITS * 3); // 262144
+
+#[derive(Clone, Copy)]
+struct CacheEntry {
+    /// Palette index result (0xFF = not populated)
+    idx: u8,
+    /// Palette color for error computation
+    color: [f32; 4],
+    /// Squared distance from cell center to second-nearest palette entry.
+    /// If query distance to best exceeds half this, the cell might be wrong.
+    half_gap_sq: f32,
+}
+
+impl Default for CacheEntry {
+    fn default() -> Self {
+        Self { idx: 0xFF, color: [0.0; 4], half_gap_sq: 0.0 }
+    }
+}
+
+/// Direct-mapped cache index from color.
+#[inline(always)]
+fn cache_index(color: &[f32; 4]) -> usize {
+    let r = (color[0].clamp(0.0, 255.0) as u32) >> CACHE_SHIFT;
+    let g = (color[1].clamp(0.0, 255.0) as u32) >> CACHE_SHIFT;
+    let b = (color[2].clamp(0.0, 255.0) as u32) >> CACHE_SHIFT;
+    (r | (g << CACHE_BITS) | (b << (CACHE_BITS * 2))) as usize
+}
+
 // Result of quantization
 pub struct QuantizeResult {
     error: f32,
@@ -111,9 +144,10 @@ impl QuantizeResult {
 
         let dithering_coeff = self.dithering_level * 15.0 / 16.0 / 16.0;
         let err_threshold = self.error;
-        // println!("Err threshold {}", self.error);
 
         let mut x_reverse = true;
+        // Direct-mapped color cache: 32K entries, no collisions
+        let mut cache = vec![CacheEntry::default(); CACHE_SIZE];
 
         for y in 0..image.height {
             x_reverse = !x_reverse;
@@ -153,7 +187,31 @@ impl QuantizeResult {
                     pix[3] as f32 + err_pix[3],
                 ];
 
-                let (ind, pal_pix, _) = self.colormap.nearest_ind(&dith_pix);
+                // Try direct-mapped cache first
+                let ci = cache_index(&dith_pix);
+                let cached = cache[ci];
+                let (ind, pal_pix) = if cached.idx != 0xFF {
+                    // Cache populated. Verify: compute distance to cached entry.
+                    // If close enough relative to the gap to 2nd-nearest, accept.
+                    let dr = dith_pix[0] - cached.color[0];
+                    let dg = dith_pix[1] - cached.color[1];
+                    let db = dith_pix[2] - cached.color[2];
+                    let da = dith_pix[3] - cached.color[3];
+                    let dist_sq = dr * dr + dg * dg + db * db + da * da;
+                    if dist_sq < cached.half_gap_sq {
+                        (cached.idx, cached.color)
+                    } else {
+                        // Near boundary: full search
+                        let (ind, pal_pix, _) = self.colormap.nearest_ind(&dith_pix);
+                        (ind, pal_pix)
+                    }
+                } else {
+                    let (ind, pal_pix, _) = self.colormap.nearest_ind(&dith_pix);
+                    // Compute gap to 2nd nearest for this cell center
+                    let half_gap_sq = self.colormap.second_nearest_dist_sq(ind, &dith_pix) * 0.25;
+                    cache[ci] = CacheEntry { idx: ind, color: pal_pix, half_gap_sq };
+                    (ind, pal_pix)
+                };
 
                 buf[point] = ind;
 
