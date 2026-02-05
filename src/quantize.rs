@@ -33,6 +33,11 @@ pub struct QuantizeResult {
     error: f32,
     dithering_level: f32,
     colormap: Colormap,
+    /// Persistent color cache across remap_image calls.
+    /// Lazily populated: first remap fills it, subsequent remaps reuse it.
+    /// For GIF animation, the first frame warms the cache; all later frames
+    /// get near-zero cache misses since the palette is unchanged.
+    cache: Vec<u8>,
 }
 
 impl QuantizeResult {
@@ -61,6 +66,7 @@ impl QuantizeResult {
             error: colormap.error,
             colormap,
             dithering_level: 1.0,
+            cache: vec![CACHE_EMPTY; CACHE_SIZE],
         }
     }
 
@@ -89,11 +95,15 @@ impl QuantizeResult {
         self.colormap.get_palette()
     }
 
-    /// Remaps the proxided [`Image`] to a slize of bytes.
+    /// Remaps the provided [`Image`] to a slice of bytes.
+    ///
+    /// The color cache is warmed on first call and reused across subsequent
+    /// calls, making multi-frame remapping (e.g. GIF animation) significantly
+    /// faster.
     ///
     /// Returns [`Error::BufferTooSmall`] if the provided buffer is smaller
     /// than `image.width * image.height`
-    pub fn remap_image(&self, image: &Image, buf: &mut [u8]) -> Result<(), Error> {
+    pub fn remap_image(&mut self, image: &Image, buf: &mut [u8]) -> Result<(), Error> {
         if buf.len() < image.width * image.height {
             return Err(Error::BufferTooSmall);
         }
@@ -107,8 +117,8 @@ impl QuantizeResult {
         Ok(())
     }
 
-    fn remap_image_no_dither(&self, image: &Image, buf: &mut [u8]) {
-        let mut cache = vec![CACHE_EMPTY; CACHE_SIZE];
+    fn remap_image_no_dither(&mut self, image: &Image, buf: &mut [u8]) {
+        let cache = &mut self.cache;
 
         #[allow(clippy::needless_range_loop)]
         for point in 0..image.width * image.height {
@@ -131,7 +141,7 @@ impl QuantizeResult {
         }
     }
 
-    fn remap_image_dither(&self, image: &Image, buf: &mut [u8]) {
+    fn remap_image_dither(&mut self, image: &Image, buf: &mut [u8]) {
         let error_size = image.width + 2;
         let mut error_curr = vec![[0f32; 4]; error_size];
         let mut error_next = vec![[0f32; 4]; error_size];
@@ -140,9 +150,9 @@ impl QuantizeResult {
         let err_threshold = self.error;
 
         let mut x_reverse = true;
-        let mut cache = vec![CACHE_EMPTY; CACHE_SIZE];
         // Fixed-size palette: u8 index → bounds check elided by compiler
         let pal = self.colormap.palette_f32();
+        let cache = &mut self.cache;
 
         for y in 0..image.height {
             x_reverse = !x_reverse;
