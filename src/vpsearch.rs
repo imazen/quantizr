@@ -98,17 +98,17 @@ impl SearchNode {
         Some(Box::new(node))
     }
 
-    // SSE version - token passed through, no dispatch overhead
+    // SSE version - token passed through, pin preloaded as vector
     #[cfg(target_arch = "x86_64")]
     #[inline(always)]
-    fn visit_sse<'a>(&'a self, token: archmage::X64V2Token, pin: &[f32; 4], nearest: &mut SearchVisitor<'a>) {
-        let distance_sq = dist_sse(token, &self.ind.data, pin);
+    fn visit_sse<'a>(&'a self, token: archmage::X64V2Token, pin_vec: core::arch::x86_64::__m128, nearest: &mut SearchVisitor<'a>) {
+        let distance_sq = dist_sse_preloaded(token, &self.ind.data, pin_vec);
 
         nearest.visit(&self.ind, distance_sq);
 
         if !self.rest.is_empty() {
             for r in self.rest.iter() {
-                let distance_sq = dist_sse(token, &r.data, pin);
+                let distance_sq = dist_sse_preloaded(token, &r.data, pin_vec);
                 nearest.visit(r, distance_sq);
             }
 
@@ -117,38 +117,38 @@ impl SearchNode {
 
         if distance_sq < self.radius_sq {
             if let Some(near) = &self.near {
-                near.visit_sse(token, pin, nearest);
+                near.visit_sse(token, pin_vec, nearest);
             }
             let diff = self.radius - nearest.distance;
             if diff <= 0.0 || distance_sq >= diff * diff {
                 if let Some(far) = &self.far {
-                    far.visit_sse(token, pin, nearest);
+                    far.visit_sse(token, pin_vec, nearest);
                 }
             }
         } else {
             if let Some(far) = &self.far {
-                far.visit_sse(token, pin, nearest);
+                far.visit_sse(token, pin_vec, nearest);
             }
             let sum = self.radius + nearest.distance;
             if distance_sq <= sum * sum {
                 if let Some(near) = &self.near {
-                    near.visit_sse(token, pin, nearest);
+                    near.visit_sse(token, pin_vec, nearest);
                 }
             }
         }
     }
 
-    // NEON version - token passed through, no dispatch overhead
+    // NEON version - token passed through, pin preloaded as vector
     #[cfg(target_arch = "aarch64")]
     #[inline(always)]
-    fn visit_neon<'a>(&'a self, token: archmage::NeonToken, pin: &[f32; 4], nearest: &mut SearchVisitor<'a>) {
-        let distance_sq = dist_neon(token, &self.ind.data, pin);
+    fn visit_neon<'a>(&'a self, token: archmage::NeonToken, pin_vec: core::arch::aarch64::float32x4_t, nearest: &mut SearchVisitor<'a>) {
+        let distance_sq = dist_neon_preloaded(token, &self.ind.data, pin_vec);
 
         nearest.visit(&self.ind, distance_sq);
 
         if !self.rest.is_empty() {
             for r in self.rest.iter() {
-                let distance_sq = dist_neon(token, &r.data, pin);
+                let distance_sq = dist_neon_preloaded(token, &r.data, pin_vec);
                 nearest.visit(r, distance_sq);
             }
 
@@ -157,22 +157,22 @@ impl SearchNode {
 
         if distance_sq < self.radius_sq {
             if let Some(near) = &self.near {
-                near.visit_neon(token, pin, nearest);
+                near.visit_neon(token, pin_vec, nearest);
             }
             let diff = self.radius - nearest.distance;
             if diff <= 0.0 || distance_sq >= diff * diff {
                 if let Some(far) = &self.far {
-                    far.visit_neon(token, pin, nearest);
+                    far.visit_neon(token, pin_vec, nearest);
                 }
             }
         } else {
             if let Some(far) = &self.far {
-                far.visit_neon(token, pin, nearest);
+                far.visit_neon(token, pin_vec, nearest);
             }
             let sum = self.radius + nearest.distance;
             if distance_sq <= sum * sum {
                 if let Some(near) = &self.near {
-                    near.visit_neon(token, pin, nearest);
+                    near.visit_neon(token, pin_vec, nearest);
                 }
             }
         }
@@ -245,12 +245,15 @@ impl SearchTree {
         if let Some(vantage_point) = &self.root {
             let mut nearest = SearchVisitor::new();
 
-            // Summon token ONCE here, then pass through entire traversal
+            // Summon token ONCE here, preload pin, pass through entire traversal
             #[cfg(target_arch = "x86_64")]
             {
                 use archmage::SimdToken;
+                use core::arch::x86_64::*;
                 if let Some(token) = archmage::X64V2Token::summon() {
-                    vantage_point.visit_sse(token, pin, &mut nearest);
+                    // Preload pin as vector - reused for all distance calculations
+                    let pin_vec = unsafe { _mm_loadu_ps(pin.as_ptr()) };
+                    vantage_point.visit_sse(token, pin_vec, &mut nearest);
                 } else {
                     vantage_point.visit_scalar(pin, &mut nearest);
                 }
@@ -259,8 +262,11 @@ impl SearchTree {
             #[cfg(target_arch = "aarch64")]
             {
                 use archmage::SimdToken;
+                use core::arch::aarch64::*;
                 if let Some(token) = archmage::NeonToken::summon() {
-                    vantage_point.visit_neon(token, pin, &mut nearest);
+                    // Preload pin as vector - reused for all distance calculations
+                    let pin_vec = unsafe { vld1q_f32(pin.as_ptr()) };
+                    vantage_point.visit_neon(token, pin_vec, &mut nearest);
                 } else {
                     vantage_point.visit_scalar(pin, &mut nearest);
                 }
@@ -282,42 +288,35 @@ impl SearchTree {
     }
 }
 
-// SSE distance - takes token, no dispatch inside
+// SSE distance with preloaded pin vector - shuffle horizontal sum
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn dist_sse(_token: archmage::X64V2Token, c1: &[f32; 4], c2: &[f32; 4]) -> f32 {
+fn dist_sse_preloaded(_token: archmage::X64V2Token, c1: &[f32; 4], pin_vec: core::arch::x86_64::__m128) -> f32 {
     use core::arch::x86_64::*;
-    // SAFETY: X64V2Token guarantees SSE4.2 is available
     unsafe {
         let pc1 = _mm_loadu_ps(c1.as_ptr());
-        let pc2 = _mm_loadu_ps(c2.as_ptr());
-
-        let diff = _mm_sub_ps(pc1, pc2);
+        let diff = _mm_sub_ps(pc1, pin_vec);
         let sq = _mm_mul_ps(diff, diff);
 
-        // Horizontal sum without memory round-trip
-        let hi = _mm_movehl_ps(sq, sq);
-        let sum2 = _mm_add_ps(sq, hi);
-        let shuf = _mm_shuffle_ps(sum2, sum2, 1);
-        let total = _mm_add_ss(sum2, shuf);
+        // Horizontal sum: [a,b,c,d] -> a+b+c+d
+        let hi = _mm_movehl_ps(sq, sq);           // [c,d,c,d]
+        let sum2 = _mm_add_ps(sq, hi);            // [a+c,b+d,_,_]
+        let shuf = _mm_shuffle_ps(sum2, sum2, 1); // [b+d,_,_,_]
+        let total = _mm_add_ss(sum2, shuf);       // [a+b+c+d,_,_,_]
         _mm_cvtss_f32(total)
     }
 }
 
-// NEON distance - takes token, no dispatch inside
+// NEON distance with preloaded pin vector
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-fn dist_neon(_token: archmage::NeonToken, c1: &[f32; 4], c2: &[f32; 4]) -> f32 {
+fn dist_neon_preloaded(_token: archmage::NeonToken, c1: &[f32; 4], pin_vec: core::arch::aarch64::float32x4_t) -> f32 {
     use core::arch::aarch64::*;
-    // SAFETY: NeonToken guarantees NEON is available
     unsafe {
         let pc1 = vld1q_f32(c1.as_ptr());
-        let pc2 = vld1q_f32(c2.as_ptr());
-
-        let mut dist = vsubq_f32(pc1, pc2);
-        dist = vmulq_f32(dist, dist);
-
-        vaddvq_f32(dist)
+        let diff = vsubq_f32(pc1, pin_vec);
+        let sq = vmulq_f32(diff, diff);
+        vaddvq_f32(sq)
     }
 }
 

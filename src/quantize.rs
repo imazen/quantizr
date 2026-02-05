@@ -8,11 +8,33 @@ use crate::palette::Palette;
 
 const EMPTY_PIX: [u8; 4] = [0; 4];
 
+/// Direct-mapped color cache: 6 bits per RGB channel = 262K entries.
+/// Each entry is a single u8 palette index (0xFF = unpopulated).
+/// Cache is 262KB — fits comfortably in L2.
+const CACHE_BITS: u32 = 6;
+const CACHE_SHIFT: u32 = 8 - CACHE_BITS;
+const CACHE_SIZE: usize = 1 << (CACHE_BITS * 3); // 262144
+const CACHE_EMPTY: u8 = 0xFF;
+
+/// Direct-mapped cache index from RGB color (ignoring alpha).
+#[inline(always)]
+fn cache_index(color: &[f32; 4]) -> usize {
+    let r = (color[0].clamp(0.0, 255.0) as u32) >> CACHE_SHIFT;
+    let g = (color[1].clamp(0.0, 255.0) as u32) >> CACHE_SHIFT;
+    let b = (color[2].clamp(0.0, 255.0) as u32) >> CACHE_SHIFT;
+    (r | (g << CACHE_BITS) | (b << (CACHE_BITS * 2))) as usize
+}
+
 // Result of quantization
 pub struct QuantizeResult {
     error: f32,
     dithering_level: f32,
     colormap: Colormap,
+    /// Persistent color cache across remap_image calls.
+    /// Lazily populated: first remap fills it, subsequent remaps reuse it.
+    cache: Vec<u8>,
+    /// Palette colors as f32 for cache hit lookups (avoids colormap access).
+    palette_f32: [[f32; 4]; 256],
 }
 
 impl QuantizeResult {
@@ -37,10 +59,24 @@ impl QuantizeResult {
             Colormap::from_clusters(&clusters)
         };
 
+        // Copy palette to f32 array for fast cache hit lookups
+        let mut palette_f32 = [[0f32; 4]; 256];
+        let palette = colormap.get_palette();
+        for (i, color) in palette.entries[..palette.count as usize].iter().enumerate() {
+            palette_f32[i] = [
+                color.r as f32,
+                color.g as f32,
+                color.b as f32,
+                color.a as f32,
+            ];
+        }
+
         Self {
             error: colormap.error,
             colormap,
             dithering_level: 1.0,
+            cache: vec![CACHE_EMPTY; CACHE_SIZE],
+            palette_f32,
         }
     }
 
@@ -69,11 +105,14 @@ impl QuantizeResult {
         self.colormap.get_palette()
     }
 
-    /// Remaps the proxided [`Image`] to a slize of bytes.
+    /// Remaps the provided [`Image`] to a slice of bytes.
+    ///
+    /// The color cache is warmed on first call and reused across subsequent
+    /// calls, providing significant speedup for animations with shared palette.
     ///
     /// Returns [`Error::BufferTooSmall`] if the provided buffer is smaller
     /// than `image.width * image.height`
-    pub fn remap_image(&self, image: &Image, buf: &mut [u8]) -> Result<(), Error> {
+    pub fn remap_image(&mut self, image: &Image, buf: &mut [u8]) -> Result<(), Error> {
         if buf.len() < image.width * image.height {
             return Err(Error::BufferTooSmall);
         }
@@ -87,31 +126,48 @@ impl QuantizeResult {
         Ok(())
     }
 
-    fn remap_image_no_dither(&self, image: &Image, buf: &mut [u8]) {
+    /// Look up color in cache, or compute via VP-tree and populate cache.
+    #[inline(always)]
+    fn lookup_cached(&mut self, color: &[f32; 4]) -> (u8, [f32; 4]) {
+        let idx = cache_index(color);
+        let cached = self.cache[idx];
+        if cached != CACHE_EMPTY {
+            // Cache hit: palette index known, look up color from palette_f32
+            // u8 index into [256] array - compiler elides bounds check
+            (cached, self.palette_f32[cached as usize])
+        } else {
+            // Cache miss: VP-tree search
+            let (ind, pal_color, _) = self.colormap.nearest_ind(color);
+            self.cache[idx] = ind;
+            (ind, pal_color)
+        }
+    }
+
+    fn remap_image_no_dither(&mut self, image: &Image, buf: &mut [u8]) {
         #[allow(clippy::needless_range_loop)]
         for point in 0..image.width * image.height {
             let data_point = point * 4;
 
             let pix = pix_or_empty(&image.data[data_point..data_point + 4]);
-            let r = pix[0] as f32;
-            let g = pix[1] as f32;
-            let b = pix[2] as f32;
-            let a = pix[3] as f32;
+            let color = [
+                pix[0] as f32,
+                pix[1] as f32,
+                pix[2] as f32,
+                pix[3] as f32,
+            ];
 
-            let (ind, _, _) = self.colormap.nearest_ind(&[r, g, b, a]);
-
+            let (ind, _) = self.lookup_cached(&color);
             buf[point] = ind;
         }
     }
 
-    fn remap_image_dither(&self, image: &Image, buf: &mut [u8]) {
+    fn remap_image_dither(&mut self, image: &Image, buf: &mut [u8]) {
         let error_size = image.width + 2;
         let mut error_curr = vec![[0f32; 4]; error_size];
         let mut error_next = vec![[0f32; 4]; error_size];
 
         let dithering_coeff = self.dithering_level * 15.0 / 16.0 / 16.0;
         let err_threshold = self.error;
-        // println!("Err threshold {}", self.error);
 
         let mut x_reverse = true;
 
@@ -153,7 +209,7 @@ impl QuantizeResult {
                     pix[3] as f32 + err_pix[3],
                 ];
 
-                let (ind, pal_pix, _) = self.colormap.nearest_ind(&dith_pix);
+                let (ind, pal_pix) = self.lookup_cached(&dith_pix);
 
                 buf[point] = ind;
 

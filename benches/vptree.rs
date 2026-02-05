@@ -29,7 +29,7 @@ fn bench_quantize_and_remap(c: &mut Criterion) {
     let image = quantizr::Image::new(&pixels, width, height).unwrap();
     let mut opts = quantizr::Options::default();
     opts.set_max_colors(256).unwrap();
-    let result = quantizr::QuantizeResult::quantize(&image, &opts);
+    let mut result = quantizr::QuantizeResult::quantize(&image, &opts);
     let mut output = vec![0u8; width * height];
 
     c.bench_function("remap_512x512", |b| {
