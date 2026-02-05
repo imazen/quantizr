@@ -8,6 +8,10 @@ use crate::palette::Palette;
 
 pub(crate) struct Colormap {
     palette: Palette,
+    /// Palette colors as f32 in a fixed-size array.
+    /// Indexed by u8 → usize, which the compiler knows is always in-bounds,
+    /// so bounds checks are elided entirely.
+    palette_f32: [[f32; 4]; 256],
     tree: vpsearch::SearchTree,
     pub(crate) error: f32,
 }
@@ -47,6 +51,7 @@ impl Colormap {
 
         Self {
             palette: entries[..size].into(),
+            palette_f32: entries,
             tree,
             error,
         }
@@ -77,6 +82,7 @@ impl Colormap {
 
         Self {
             palette: entries[..size].into(),
+            palette_f32: entries,
             tree,
             error: 0f32,
         }
@@ -86,26 +92,16 @@ impl Colormap {
         &self.palette
     }
 
+    /// Fixed-size f32 palette for bounds-check-free u8 indexing.
     #[inline(always)]
-    pub(crate) fn nearest_ind(&self, color: &[f32; 4]) -> (u8, [f32; 4], f32) {
-        self.tree.find_nearest(color)
+    pub(crate) fn palette_f32(&self) -> &[[f32; 4]; 256] {
+        &self.palette_f32
     }
 
-    /// Compute squared distance from `color` to the second-nearest palette entry
-    /// (excluding `best_idx`). Used for cache validation margin.
-    pub(crate) fn second_nearest_dist_sq(&self, best_idx: u8, color: &[f32; 4]) -> f32 {
-        let pal = self.get_palette();
-        let mut second_best = f32::MAX;
-        for (i, entry) in pal.entries.iter().enumerate() {
-            if i as u8 == best_idx { continue; }
-            let dr = color[0] - entry.r as f32;
-            let dg = color[1] - entry.g as f32;
-            let db = color[2] - entry.b as f32;
-            let da = color[3] - entry.a as f32;
-            let d = dr * dr + dg * dg + db * db + da * da;
-            if d < second_best { second_best = d; }
-        }
-        second_best
+    #[inline(always)]
+    pub(crate) fn nearest_ind(&self, color: &[f32; 4]) -> (u8, f32) {
+        let (ind, _, dist) = self.tree.find_nearest(color);
+        (ind, dist)
     }
 }
 
