@@ -1,0 +1,22 @@
+[package]
+name = "quantizr"
+description = "Fast library for converting RGBA images to 8-bit palette images"
+version = "1.4.3"
+authors = ["DarthSim <darthsim@gmail.com>"]
+edition = "2024"
+license-file = "LICENSE"
+repository="https://github.com/DarthSim/quantizr"
+
+[lib]
+name = "quantizr"
+
+[profile.release]
+opt-level = 3
+lto = true
+debug = false
+debug-assertions = false
+
+[features]
+"capi" = []
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
