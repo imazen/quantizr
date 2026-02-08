@@ -33,7 +33,7 @@ name = "quantizr"
 path = "src/lib.rs"
 
 [dependencies]
-archmage = "0.4"
+archmage = "0.5"
 
 [profile.release]
 opt-level = 3

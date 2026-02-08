@@ -11,7 +11,7 @@ repository="https://github.com/DarthSim/quantizr"
 name = "quantizr"
 
 [dependencies]
-archmage = "0.4"
+archmage = "0.5"
 
 [dev-dependencies]
 criterion = "0.5"
