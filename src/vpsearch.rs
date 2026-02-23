@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_if)]
 use crate::ord_float::OrdFloat32;
 
 #[derive(Clone)]
