@@ -116,7 +116,7 @@ pub extern "C" fn quantizr_get_error(result: &QuantizeResult) -> f32 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn quantizr_remap(
-    result: &QuantizeResult,
+    result: &mut QuantizeResult,
     image: &Image,
     buffer: *mut u8,
     buffer_size: usize,
