@@ -101,7 +101,12 @@ impl SearchNode {
     // SSE version - token passed through, pin preloaded as vector
     #[cfg(target_arch = "x86_64")]
     #[inline(always)]
-    fn visit_sse<'a>(&'a self, token: archmage::X64V2Token, pin_vec: core::arch::x86_64::__m128, nearest: &mut SearchVisitor<'a>) {
+    fn visit_sse<'a>(
+        &'a self,
+        token: archmage::X64V2Token,
+        pin_vec: core::arch::x86_64::__m128,
+        nearest: &mut SearchVisitor<'a>,
+    ) {
         let distance_sq = dist_sse_preloaded(token, &self.ind.data, pin_vec);
 
         nearest.visit(&self.ind, distance_sq);
@@ -141,7 +146,12 @@ impl SearchNode {
     // NEON version - token passed through, pin preloaded as vector
     #[cfg(target_arch = "aarch64")]
     #[inline(always)]
-    fn visit_neon<'a>(&'a self, token: archmage::NeonToken, pin_vec: core::arch::aarch64::float32x4_t, nearest: &mut SearchVisitor<'a>) {
+    fn visit_neon<'a>(
+        &'a self,
+        token: archmage::NeonToken,
+        pin_vec: core::arch::aarch64::float32x4_t,
+        nearest: &mut SearchVisitor<'a>,
+    ) {
         let distance_sq = dist_neon_preloaded(token, &self.ind.data, pin_vec);
 
         nearest.visit(&self.ind, distance_sq);
@@ -291,7 +301,11 @@ impl SearchTree {
 // SSE distance with preloaded pin vector - shuffle horizontal sum
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn dist_sse_preloaded(_token: archmage::X64V2Token, c1: &[f32; 4], pin_vec: core::arch::x86_64::__m128) -> f32 {
+fn dist_sse_preloaded(
+    _token: archmage::X64V2Token,
+    c1: &[f32; 4],
+    pin_vec: core::arch::x86_64::__m128,
+) -> f32 {
     use core::arch::x86_64::*;
     unsafe {
         let pc1 = _mm_loadu_ps(c1.as_ptr());
@@ -299,10 +313,10 @@ fn dist_sse_preloaded(_token: archmage::X64V2Token, c1: &[f32; 4], pin_vec: core
         let sq = _mm_mul_ps(diff, diff);
 
         // Horizontal sum: [a,b,c,d] -> a+b+c+d
-        let hi = _mm_movehl_ps(sq, sq);           // [c,d,c,d]
-        let sum2 = _mm_add_ps(sq, hi);            // [a+c,b+d,_,_]
+        let hi = _mm_movehl_ps(sq, sq); // [c,d,c,d]
+        let sum2 = _mm_add_ps(sq, hi); // [a+c,b+d,_,_]
         let shuf = _mm_shuffle_ps(sum2, sum2, 1); // [b+d,_,_,_]
-        let total = _mm_add_ss(sum2, shuf);       // [a+b+c+d,_,_,_]
+        let total = _mm_add_ss(sum2, shuf); // [a+b+c+d,_,_,_]
         _mm_cvtss_f32(total)
     }
 }
@@ -310,7 +324,11 @@ fn dist_sse_preloaded(_token: archmage::X64V2Token, c1: &[f32; 4], pin_vec: core
 // NEON distance with preloaded pin vector
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-fn dist_neon_preloaded(_token: archmage::NeonToken, c1: &[f32; 4], pin_vec: core::arch::aarch64::float32x4_t) -> f32 {
+fn dist_neon_preloaded(
+    _token: archmage::NeonToken,
+    c1: &[f32; 4],
+    pin_vec: core::arch::aarch64::float32x4_t,
+) -> f32 {
     use core::arch::aarch64::*;
     unsafe {
         let pc1 = vld1q_f32(c1.as_ptr());

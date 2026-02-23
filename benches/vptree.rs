@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 // Simple LCG for reproducible pseudo-random noise
 fn lcg_next(state: &mut u32) -> u32 {
@@ -14,7 +14,7 @@ fn bench_quantize_and_remap(c: &mut Criterion) {
     for y in 0..height {
         for x in 0..width {
             let i = (y * width + x) * 4;
-            pixels[i] = ((x * 255) / width) as u8;     // R
+            pixels[i] = ((x * 255) / width) as u8; // R
             pixels[i + 1] = ((y * 255) / height) as u8; // G
             pixels[i + 2] = (((x + y) * 127) / (width + height)) as u8; // B
             pixels[i + 3] = 255; // A
@@ -33,7 +33,8 @@ fn bench_quantize_and_remap(c: &mut Criterion) {
             let noise_b = (lcg_next(&mut rng_state) % 64) as i16 - 32;
             noisy_pixels[i] = (((x * 255) / width) as i16 + noise_r).clamp(0, 255) as u8;
             noisy_pixels[i + 1] = (((y * 255) / height) as i16 + noise_g).clamp(0, 255) as u8;
-            noisy_pixels[i + 2] = ((((x + y) * 127) / (width + height)) as i16 + noise_b).clamp(0, 255) as u8;
+            noisy_pixels[i + 2] =
+                ((((x + y) * 127) / (width + height)) as i16 + noise_b).clamp(0, 255) as u8;
             noisy_pixels[i + 3] = 255;
         }
     }
@@ -57,7 +58,9 @@ fn bench_quantize_and_remap(c: &mut Criterion) {
 
     c.bench_function("remap_512x512", |b| {
         b.iter(|| {
-            result.remap_image(black_box(&image), black_box(&mut output)).unwrap();
+            result
+                .remap_image(black_box(&image), black_box(&mut output))
+                .unwrap();
         })
     });
 
@@ -77,7 +80,9 @@ fn bench_quantize_and_remap(c: &mut Criterion) {
 
     c.bench_function("remap_noisy_512x512", |b| {
         b.iter(|| {
-            noisy_result.remap_image(black_box(&noisy_image), black_box(&mut output)).unwrap();
+            noisy_result
+                .remap_image(black_box(&noisy_image), black_box(&mut output))
+                .unwrap();
         })
     });
 }

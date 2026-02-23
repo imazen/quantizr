@@ -149,12 +149,7 @@ impl QuantizeResult {
             let data_point = point * 4;
 
             let pix = pix_or_empty(&image.data[data_point..data_point + 4]);
-            let color = [
-                pix[0] as f32,
-                pix[1] as f32,
-                pix[2] as f32,
-                pix[3] as f32,
-            ];
+            let color = [pix[0] as f32, pix[1] as f32, pix[2] as f32, pix[3] as f32];
 
             let (ind, _) = self.lookup_cached(&color);
             buf[point] = ind;
